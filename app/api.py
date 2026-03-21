@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy import create_engine, text
 import pandas as pd
@@ -26,7 +27,18 @@ DB_URL = "postgresql://aipuser:aip_pass_change_me@localhost:5432/aipdb"
 engine = create_engine(DB_URL)
 
 # --- App ---
-app = FastAPI(title="Sentinel AIP API")
+app = FastAPI(
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "https://qss-website-seven.vercel.app",
+    ],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+title="Sentinel AIP API")
 
 class RunRequest(BaseModel):
     po_csv_path: str
