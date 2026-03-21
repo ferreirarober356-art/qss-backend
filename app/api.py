@@ -1,6 +1,7 @@
 import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 from sqlalchemy import create_engine, text
 
 app = FastAPI(title="Sentinel AIP API")
@@ -14,12 +15,18 @@ app.add_middleware(
 )
 
 DATABASE_URL = os.getenv("DATABASE_URL")
-
 engine = create_engine(DATABASE_URL) if DATABASE_URL else None
+
+
+class CaseActionRequest(BaseModel):
+    action: str
+    actor: str = "analyst"
+
 
 def init_db():
     if not engine:
         return
+
     with engine.begin() as conn:
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS cases_mgmt (
@@ -44,17 +51,21 @@ def init_db():
                 ('Threat Hunt Review', 'MEDIUM', 'OPEN', 'analyst')
             """))
 
+
 @app.on_event("startup")
 def startup():
     init_db()
+
 
 @app.get("/")
 def root():
     return {"service": "qss-backend", "status": "running"}
 
+
 @app.get("/health")
 def health():
     return {"ok": True, "status": "ok"}
+
 
 @app.get("/cases/list")
 def list_cases(limit: int = 50):
@@ -80,3 +91,75 @@ def list_cases(limit: int = 50):
             return {"cases": list(rows), "count": len(rows), "status": "ok"}
     except Exception as e:
         return {"cases": [], "count": 0, "status": "db_error", "detail": str(e)}
+
+
+@app.get("/cases/{case_id}")
+def get_case(case_id: str):
+    if not engine:
+        return {"error": "no_database"}
+
+    try:
+        with engine.begin() as conn:
+            row = conn.execute(text("""
+                SELECT
+                    case_id::text,
+                    title,
+                    priority,
+                    status,
+                    created_by,
+                    created_at,
+                    updated_at
+                FROM cases_mgmt
+                WHERE case_id::text = :case_id
+            """), {"case_id": case_id}).mappings().first()
+
+            if not row:
+                return {"error": "not_found"}
+
+            return dict(row)
+    except Exception as e:
+        return {"error": "db_error", "detail": str(e)}
+
+
+@app.post("/cases/{case_id}/action")
+def case_action(case_id: str, req: CaseActionRequest):
+    if not engine:
+        return {"ok": False, "error": "no_database"}
+
+    action = req.action.upper().strip()
+    mapping = {
+        "ACKNOWLEDGE": "ACKNOWLEDGED",
+        "ESCALATE": "ESCALATED",
+        "CLOSE": "CLOSED",
+    }
+
+    if action not in mapping:
+        return {"ok": False, "error": "invalid_action"}
+
+    try:
+        with engine.begin() as conn:
+            updated = conn.execute(text("""
+                UPDATE cases_mgmt
+                SET
+                    status = :status,
+                    updated_at = NOW()
+                WHERE case_id::text = :case_id
+                RETURNING
+                    case_id::text,
+                    title,
+                    priority,
+                    status,
+                    created_by,
+                    created_at,
+                    updated_at
+            """), {
+                "case_id": case_id,
+                "status": mapping[action],
+            }).mappings().first()
+
+            if not updated:
+                return {"ok": False, "error": "not_found"}
+
+            return {"ok": True, "case": dict(updated)}
+    except Exception as e:
+        return {"ok": False, "error": "db_error", "detail": str(e)}
