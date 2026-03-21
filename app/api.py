@@ -121,6 +121,10 @@ def list_cases(limit: int = 50):
     except Exception as e:
         print("DB ERROR:", str(e))
         return {"cases": [], "count": 0, "status": "fallback"}
+
+    except Exception as e:
+        print("DB ERROR:", str(e))
+        return {"cases": [], "count": 0, "status": "fallback"}
     except Exception as e:
         return {"cases": [], "count": 0, "warning": "database unavailable", "detail": str(e)}
 
