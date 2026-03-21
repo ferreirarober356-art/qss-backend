@@ -29,16 +29,16 @@ engine = create_engine(DB_URL)
 # --- App ---
 app = FastAPI(
 
+title="Sentinel AIP API")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "https://qss-website-seven.vercel.app",
-    ],
+    allow_origins=["*"],
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-title="Sentinel AIP API")
+
 
 class RunRequest(BaseModel):
     po_csv_path: str
