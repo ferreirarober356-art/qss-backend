@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy import create_engine, text
@@ -106,14 +107,17 @@ def alert_action(req: AlertActionReq):
 
 @app.get("/cases/list")
 def list_cases(limit: int = 50):
-    with engine.begin() as conn:
-        rows = conn.execute(text("""
-            SELECT case_id::text, title, priority, status, created_by, created_at, updated_at
-            FROM cases_mgmt
-            ORDER BY updated_at DESC
-            LIMIT :limit
-        """), {"limit": limit}).mappings().all()
-        return {"cases": list(rows)}
+    try:
+        with engine.begin() as conn:
+            rows = conn.execute(text("""
+                SELECT case_id::text, title, priority, status, created_by, created_at, updated_at
+                FROM cases_mgmt
+                ORDER BY updated_at DESC
+                LIMIT :limit
+            """), {"limit": limit}).mappings().all()
+            return {"cases": list(rows), "count": len(rows)}
+    except Exception as e:
+        return {"cases": [], "count": 0, "warning": "database unavailable", "detail": str(e)}
 
 @app.get("/cases/{case_id}")
 def get_case(case_id: str):
