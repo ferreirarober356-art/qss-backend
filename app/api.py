@@ -163,3 +163,10 @@ def case_action(case_id: str, req: CaseActionRequest):
             return {"ok": True, "case": dict(updated)}
     except Exception as e:
         return {"ok": False, "error": "db_error", "detail": str(e)}
+
+@app.get("/debug/env")
+def debug_env():
+    return {
+        "has_database_url": bool(os.getenv("DATABASE_URL")),
+        "database_url_prefix": (os.getenv("DATABASE_URL") or "")[:18],
+    }
