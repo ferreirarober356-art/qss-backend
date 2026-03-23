@@ -24,9 +24,11 @@ if DATABASE_URL:
     except Exception as e:
         engine_error = str(e)
 
+
 class CaseActionRequest(BaseModel):
     action: str
     actor: str = "analyst"
+
 
 def init_db():
     global engine_error
@@ -60,13 +62,16 @@ def init_db():
     except Exception as e:
         engine_error = str(e)
 
+
 @app.on_event("startup")
 def startup():
     init_db()
 
+
 @app.get("/")
 def root():
     return {"service": "qss-backend", "status": "running"}
+
 
 @app.get("/health")
 def health():
@@ -78,6 +83,7 @@ def health():
         "engine_error": engine_error,
     }
 
+
 @app.get("/debug/env")
 def debug_env():
     return {
@@ -86,6 +92,7 @@ def debug_env():
         "engine_ready": bool(engine),
         "engine_error": engine_error,
     }
+
 
 @app.get("/cases/list")
 def list_cases(limit: int = 50):
@@ -117,6 +124,7 @@ def list_cases(limit: int = 50):
     except Exception as e:
         return {"cases": [], "count": 0, "status": "db_error", "detail": str(e)}
 
+
 @app.get("/cases/{case_id}")
 def get_case(case_id: str):
     if not engine:
@@ -143,6 +151,7 @@ def get_case(case_id: str):
             return dict(row)
     except Exception as e:
         return {"error": "db_error", "detail": str(e)}
+
 
 @app.post("/cases/{case_id}/action")
 def case_action(case_id: str, req: CaseActionRequest):
