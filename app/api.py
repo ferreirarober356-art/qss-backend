@@ -281,3 +281,126 @@ def add_event(case_id: str, payload: TimelineCreate):
     with engine.begin() as conn:
         ev = insert_event(conn, case_id, payload.event_type, payload.description, payload.source, payload.metadata)
         return {"ok": True, "event": ev}
+
+
+class CaseSummaryResponse(BaseModel):
+    case_id: str
+    executive_summary: str
+    analyst_summary: str
+    likely_tactics: list[str]
+    recommended_actions: list[str]
+    suggested_missions: list[str]
+
+def generate_case_summary(case_row, notes, timeline):
+    title = case_row.get("title", "Unknown Case")
+    priority = case_row.get("priority", "UNKNOWN")
+    status = case_row.get("status", "UNKNOWN")
+    created_by = case_row.get("created_by", "system")
+
+    note_count = len(notes or [])
+    timeline_count = len(timeline or [])
+
+    combined_text = " ".join(
+        [title, priority, status]
+        + [str(n.get("content", "")) for n in (notes or [])]
+        + [str(t.get("description", "")) for t in (timeline or [])]
+    ).lower()
+
+    tactics = []
+    if "phish" in combined_text or "email" in combined_text:
+        tactics.append("TA0001")
+    if "lateral" in combined_text or "movement" in combined_text:
+        tactics.append("TA0008")
+    if "credential" in combined_text or "password" in combined_text or "auth" in combined_text:
+        tactics.append("TA0006")
+    if "privilege" in combined_text or "admin" in combined_text:
+        tactics.append("TA0004")
+    if not tactics:
+        tactics = ["TA0005"]
+
+    recommended_actions = []
+    if priority in ("HIGH", "CRITICAL"):
+        recommended_actions.append("Escalate investigation and validate containment status")
+        recommended_actions.append("Review affected assets and confirm scope of exposure")
+    else:
+        recommended_actions.append("Continue triage and collect supporting evidence")
+
+    if note_count == 0:
+        recommended_actions.append("Add first analyst triage note")
+    if timeline_count < 2:
+        recommended_actions.append("Expand timeline with supporting events and evidence")
+
+    suggested_missions = []
+    if "TA0006" in tactics:
+        suggested_missions.append("Credential Review Sweep")
+    if "TA0008" in tactics:
+        suggested_missions.append("Lateral Movement Hunt")
+    if priority in ("HIGH", "CRITICAL"):
+        suggested_missions.append("Containment Workflow")
+        suggested_missions.append("Executive Reporting Workflow")
+    else:
+        suggested_missions.append("IOC Enrichment Workflow")
+
+    executive_summary = (
+        f"{title} is currently {status} with {priority} priority. "
+        f"The case was created by {created_by} and currently contains {note_count} notes "
+        f"and {timeline_count} timeline events. "
+        f"QSS assessment indicates the incident should be reviewed against likely tactics: {', '.join(tactics)}."
+    )
+
+    analyst_summary = (
+        f"Case {case_row.get('case_id')} titled '{title}' is in status {status}. "
+        f"Observed context from notes and timeline suggests ATT&CK alignment to {', '.join(tactics)}. "
+        f"Recommended analyst focus: {'; '.join(recommended_actions)}."
+    )
+
+    return {
+        "case_id": str(case_row.get("case_id")),
+        "executive_summary": executive_summary,
+        "analyst_summary": analyst_summary,
+        "likely_tactics": tactics,
+        "recommended_actions": recommended_actions,
+        "suggested_missions": suggested_missions,
+    }
+
+@app.get("/cases/{case_id}/summary")
+def case_summary(case_id: str):
+    if not engine:
+        return {"ok": False, "error": "no_database", "engine_error": engine_error}
+
+    try:
+        with engine.begin() as conn:
+            case_row = conn.execute(text("""
+                SELECT
+                    case_id::text,
+                    title,
+                    priority,
+                    status,
+                    created_by,
+                    created_at,
+                    updated_at
+                FROM cases_mgmt
+                WHERE case_id::text = :case_id
+            """), {"case_id": case_id}).mappings().first()
+
+            if not case_row:
+                return {"ok": False, "error": "not_found"}
+
+            notes = conn.execute(text("""
+                SELECT note_id, case_id, author, content, tags, created_at
+                FROM analyst_notes
+                WHERE case_id = :case_id
+                ORDER BY created_at ASC
+            """), {"case_id": case_id}).mappings().all()
+
+            timeline = conn.execute(text("""
+                SELECT event_id, case_id, event_type, description, source, metadata, created_at
+                FROM case_timeline
+                WHERE case_id = :case_id
+                ORDER BY created_at ASC
+            """), {"case_id": case_id}).mappings().all()
+
+            summary = generate_case_summary(dict(case_row), list(notes), list(timeline))
+            return {"ok": True, "summary": summary}
+    except Exception as e:
+        return {"ok": False, "error": "db_error", "detail": str(e)}
