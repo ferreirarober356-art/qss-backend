@@ -1,0 +1,14 @@
+                            Table "public.analyst_notes"
+   Column   |            Type             | Collation | Nullable |      Default      
+------------+-----------------------------+-----------+----------+-------------------
+ note_id    | uuid                        |           | not null | gen_random_uuid()
+ case_id    | text                        |           | not null | 
+ author     | text                        |           | not null | 
+ content    | text                        |           | not null | 
+ tags       | text[]                      |           |          | ARRAY[]::text[]
+ created_at | timestamp without time zone |           | not null | now()
+Indexes:
+    "analyst_notes_pkey" PRIMARY KEY, btree (note_id)
+    "idx_analyst_notes_case_id" btree (case_id)
+    "idx_analyst_notes_created_at" btree (created_at DESC)
+
