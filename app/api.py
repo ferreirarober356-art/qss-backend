@@ -404,3 +404,42 @@ def case_summary(case_id: str):
             return {"ok": True, "summary": summary}
     except Exception as e:
         return {"ok": False, "error": "db_error", "detail": str(e)}
+
+
+class MissionLaunchRequest(BaseModel):
+    mission_name: str
+    actor: str = "analyst"
+
+@app.post("/cases/{case_id}/missions/launch")
+def launch_mission(case_id: str, req: MissionLaunchRequest):
+    if not engine:
+        return {"ok": False, "error": "no_database", "engine_error": engine_error}
+
+    try:
+        with engine.begin() as conn:
+            case_row = conn.execute(text("""
+                SELECT case_id::text
+                FROM cases_mgmt
+                WHERE case_id::text = :case_id
+            """), {"case_id": case_id}).mappings().first()
+
+            if not case_row:
+                return {"ok": False, "error": "not_found"}
+
+            insert_event(
+                conn,
+                case_id,
+                "MISSION",
+                f"Mission launched: {req.mission_name}",
+                req.actor,
+                {"mission_name": req.mission_name}
+            )
+
+            return {
+                "ok": True,
+                "case_id": case_id,
+                "mission": req.mission_name,
+                "status": "queued"
+            }
+    except Exception as e:
+        return {"ok": False, "error": "db_error", "detail": str(e)}
