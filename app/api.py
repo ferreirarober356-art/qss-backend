@@ -1,4 +1,6 @@
 import os
+import json
+from openai import OpenAI
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -15,8 +17,10 @@ app.add_middleware(
 )
 
 DATABASE_URL = os.getenv("DATABASE_URL")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 engine = None
 engine_error = None
+client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 if DATABASE_URL:
     try:
@@ -400,7 +404,7 @@ def case_summary(case_id: str):
                 ORDER BY created_at ASC
             """), {"case_id": case_id}).mappings().all()
 
-            summary = generate_case_summary(dict(case_row), list(notes), list(timeline))
+            summary = generate_case_summary_ai(dict(case_row), list(notes), list(timeline)) or generate_case_summary(dict(case_row), list(notes), list(timeline))
             return {"ok": True, "summary": summary}
     except Exception as e:
         return {"ok": False, "error": "db_error", "detail": str(e)}
@@ -443,3 +447,26 @@ def launch_mission(case_id: str, req: MissionLaunchRequest):
             }
     except Exception as e:
         return {"ok": False, "error": "db_error", "detail": str(e)}
+
+
+def generate_case_summary_ai(case_row, notes, timeline):
+    if not client:
+        return None
+
+    payload = {
+        "case": case_row,
+        "notes": notes,
+        "timeline": timeline,
+        "task": "Return JSON with executive_summary, analyst_summary, likely_tactics, recommended_actions, suggested_missions"
+    }
+
+    response = client.chat.completions.create(
+        model="gpt-4.1-mini",
+        response_format={"type": "json_object"},
+        messages=[
+            {"role": "system", "content": "You are a SOC AI assistant. Output strict JSON."},
+            {"role": "user", "content": json.dumps(payload)}
+        ]
+    )
+
+    return json.loads(response.choices[0].message.content)
