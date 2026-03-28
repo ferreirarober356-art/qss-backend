@@ -1026,6 +1026,7 @@ def execute_response(case_id: str, response_id: str):
         return {"ok": False, "error": "db_error", "detail": str(e)}
 
 
+
 def auto_plan_containment_actions(conn, case_id, case_row, summary):
     try:
         ensure_response_table(conn)
@@ -1094,12 +1095,15 @@ def auto_plan_containment_actions(conn, case_id, case_row, summary):
             "planned_actions": created,
             "priority": priority,
             "tactics": tactics,
-            "candidate_plans": plans
+            "candidate_plans": plans,
+            "existing_pairs": list(existing_pairs),
+            "helper_version": "debug_v2"
         }
     except Exception as e:
         return {
             "planned_actions": [],
             "error": str(e),
             "priority": str(case_row.get("priority", "MEDIUM")).upper(),
-            "tactics": summary.get("likely_tactics", []) or []
+            "tactics": summary.get("likely_tactics", []) or [],
+            "helper_version": "debug_v2"
         }
