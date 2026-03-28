@@ -407,7 +407,8 @@ def case_summary(case_id: str):
             summary = generate_case_summary_ai(dict(case_row), list(notes), list(timeline)) or generate_case_summary(dict(case_row), list(notes), list(timeline))
             
             auto_response_engine(conn, case_id, dict(case_row), summary)
-            return {"ok": True, "summary": summary}
+            auto_result = auto_hunt_and_response(conn, case_id, dict(case_row), summary)
+            return {"ok": True, "summary": summary, "autonomous_actions": auto_result}
     
     except Exception as e:
         return {"ok": False, "error": "db_error", "detail": str(e)}
@@ -709,3 +710,95 @@ def run_hunt(case_id: str, req: HuntRequest):
             return {"ok": True, "hunt": plan, "status": "generated"}
     except Exception as e:
         return {"ok": False, "error": "db_error", "detail": str(e)}
+
+
+def auto_hunt_and_response(conn, case_id, case_row, summary):
+    try:
+        priority = str(case_row.get("priority", "MEDIUM")).upper()
+        tactics = summary.get("likely_tactics", []) or []
+        triggered_missions = []
+        hunt_objective = None
+
+        if priority in ("HIGH", "CRITICAL"):
+            triggered_missions.append("Containment Workflow")
+            triggered_missions.append("Executive Reporting Workflow")
+
+        if "TA0008" in tactics:
+            triggered_missions.append("Lateral Movement Hunt")
+            hunt_objective = "Investigate likely lateral movement and internal propagation"
+
+        if "TA0006" in tactics:
+            triggered_missions.append("Credential Review Sweep")
+            if not hunt_objective:
+                hunt_objective = "Investigate likely credential abuse and authentication anomalies"
+
+        if not hunt_objective and priority in ("HIGH", "CRITICAL"):
+            hunt_objective = "Investigate high-priority case for scope, impact, and follow-on attacker activity"
+
+        deduped = []
+        for mission in triggered_missions:
+            if mission not in deduped:
+                deduped.append(mission)
+        triggered_missions = deduped
+
+        for mission in triggered_missions:
+            insert_event(
+                conn,
+                case_id,
+                "AUTO_MISSION",
+                f"Auto-triggered mission: {mission}",
+                "ai-engine",
+                {"mission_name": mission, "reason": "summary_analysis"}
+            )
+
+        hunt_plan = None
+        if hunt_objective:
+            notes = conn.execute(text("""
+                SELECT note_id, case_id, author, content, tags, created_at
+                FROM analyst_notes
+                WHERE case_id = :case_id
+                ORDER BY created_at ASC
+            """), {"case_id": case_id}).mappings().all()
+
+            timeline = conn.execute(text("""
+                SELECT event_id, case_id, event_type, description, source, metadata, created_at
+                FROM case_timeline
+                WHERE case_id = :case_id
+                ORDER BY created_at ASC
+            """), {"case_id": case_id}).mappings().all()
+
+            hunt_plan = generate_hunt_plan_ai(dict(case_row), list(notes), list(timeline), hunt_objective) or generate_hunt_plan(dict(case_row), list(notes), list(timeline))
+
+            insert_event(
+                conn,
+                case_id,
+                "AUTO_HUNT",
+                f"Auto-triggered hunt: {hunt_objective}",
+                "ai-engine",
+                hunt_plan
+            )
+
+        if triggered_missions or hunt_plan:
+            insert_event(
+                conn,
+                case_id,
+                "AI",
+                "Autonomous cyber response executed",
+                "ai-engine",
+                {
+                    "missions": triggered_missions,
+                    "hunt_generated": bool(hunt_plan),
+                    "tactics": tactics,
+                    "priority": priority
+                }
+            )
+
+        return {
+            "missions": triggered_missions,
+            "hunt_generated": bool(hunt_plan)
+        }
+    except Exception:
+        return {
+            "missions": [],
+            "hunt_generated": False
+        }
