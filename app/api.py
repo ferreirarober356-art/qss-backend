@@ -408,7 +408,13 @@ def case_summary(case_id: str):
             
             auto_response_engine(conn, case_id, dict(case_row), summary)
             auto_result = auto_hunt_and_response(conn, case_id, dict(case_row), summary)
-            return {"ok": True, "summary": summary, "autonomous_actions": auto_result}
+            containment_result = auto_plan_containment_actions(conn, case_id, dict(case_row), summary)
+            return {
+                "ok": True,
+                "summary": summary,
+                "autonomous_actions": auto_result,
+                "auto_planned_responses": containment_result
+            }
     
     except Exception as e:
         return {"ok": False, "error": "db_error", "detail": str(e)}
@@ -1018,3 +1024,70 @@ def execute_response(case_id: str, response_id: str):
             return {"ok": True, "response": dict(updated), "execution": result}
     except Exception as e:
         return {"ok": False, "error": "db_error", "detail": str(e)}
+
+
+def auto_plan_containment_actions(conn, case_id, case_row, summary):
+    try:
+        priority = str(case_row.get("priority", "MEDIUM")).upper()
+        tactics = summary.get("likely_tactics", []) or []
+        plans = []
+
+        if priority in ("HIGH", "CRITICAL"):
+            plans.append(("contain_case", f"case-{case_id}"))
+
+        if "TA0006" in tactics:
+            plans.append(("disable_user", f"user-linked-to-case-{case_id}"))
+
+        if "TA0008" in tactics:
+            plans.append(("isolate_host", f"host-linked-to-case-{case_id}"))
+
+        if "TA0006" in tactics or "TA0008" in tactics:
+            plans.append(("block_ip", f"suspect-ip-for-case-{case_id}"))
+
+        existing = conn.execute(text("""
+            SELECT action_type, target
+            FROM response_actions
+            WHERE case_id = :case_id
+        """), {"case_id": case_id}).mappings().all()
+
+        existing_pairs = {(row["action_type"], row["target"]) for row in existing}
+        created = []
+
+        for action_type, target in plans:
+            if (action_type, target) in existing_pairs:
+                continue
+
+            action = insert_response_action(conn, case_id, action_type, target, "ai-engine")
+            created.append({
+                "response_id": str(action["response_id"]),
+                "action_type": action["action_type"],
+                "target": action["target"],
+                "status": action["status"]
+            })
+
+            insert_event(
+                conn,
+                case_id,
+                "RESPONSE_PLAN",
+                f"Auto-planned response: {action_type} -> {target}",
+                "ai-engine",
+                {
+                    "response_id": str(action["response_id"]),
+                    "status": action["status"],
+                    "reason": "summary_and_tactics"
+                }
+            )
+
+        if created:
+            insert_event(
+                conn,
+                case_id,
+                "AI",
+                f"Auto-planned {len(created)} containment actions",
+                "ai-engine",
+                {"planned_actions": created}
+            )
+
+        return {"planned_actions": created}
+    except Exception:
+        return {"planned_actions": []}
