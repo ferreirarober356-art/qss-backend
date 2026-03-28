@@ -1,0 +1,283 @@
+import os
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from sqlalchemy import create_engine, text
+
+app = FastAPI(title="Sentinel AIP API")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+DATABASE_URL = os.getenv("DATABASE_URL")
+engine = None
+engine_error = None
+
+if DATABASE_URL:
+    try:
+        engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+    except Exception as e:
+        engine_error = str(e)
+
+
+class CaseActionRequest(BaseModel):
+    action: str
+    actor: str = "analyst"
+
+
+def init_db():
+    global engine_error
+    if not engine:
+        return
+
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS cases_mgmt (
+                    case_id SERIAL PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    priority TEXT DEFAULT 'MEDIUM',
+                    status TEXT DEFAULT 'OPEN',
+                    created_by TEXT DEFAULT 'system',
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    updated_at TIMESTAMP DEFAULT NOW()
+                )
+            """))
+
+            result = conn.execute(text("SELECT COUNT(*) FROM cases_mgmt"))
+            count = result.scalar()
+
+            if count == 0:
+                conn.execute(text("""
+                    INSERT INTO cases_mgmt (title, priority, status, created_by)
+                    VALUES
+                    ('Initial QSS Case', 'HIGH', 'OPEN', 'system'),
+                    ('Threat Hunt Review', 'MEDIUM', 'OPEN', 'analyst')
+                """))
+    except Exception as e:
+        engine_error = str(e)
+
+
+@app.on_event("startup")
+def startup():
+    init_db()
+
+
+@app.get("/")
+def root():
+    return {"service": "qss-backend", "status": "running"}
+
+
+@app.get("/health")
+def health():
+    return {
+        "ok": True,
+        "status": "ok",
+        "has_database_url": bool(DATABASE_URL),
+        "engine_ready": bool(engine),
+        "engine_error": engine_error,
+    }
+
+
+@app.get("/debug/env")
+def debug_env():
+    return {
+        "has_database_url": bool(DATABASE_URL),
+        "database_url_prefix": (DATABASE_URL or "")[:24],
+        "engine_ready": bool(engine),
+        "engine_error": engine_error,
+    }
+
+
+@app.get("/cases/list")
+def list_cases(limit: int = 50):
+    if not engine:
+        return {
+            "cases": [],
+            "count": 0,
+            "status": "no_database",
+            "engine_error": engine_error,
+        }
+
+    try:
+        with engine.begin() as conn:
+            rows = conn.execute(text("""
+                SELECT
+                    case_id::text,
+                    title,
+                    priority,
+                    status,
+                    created_by,
+                    created_at,
+                    updated_at
+                FROM cases_mgmt
+                ORDER BY updated_at DESC
+                LIMIT :limit
+            """), {"limit": limit}).mappings().all()
+
+            return {"cases": list(rows), "count": len(rows), "status": "ok"}
+    except Exception as e:
+        return {"cases": [], "count": 0, "status": "db_error", "detail": str(e)}
+
+
+@app.get("/cases/{case_id}")
+def get_case(case_id: str):
+    if not engine:
+        return {"error": "no_database", "engine_error": engine_error}
+
+    try:
+        with engine.begin() as conn:
+            row = conn.execute(text("""
+                SELECT
+                    case_id::text,
+                    title,
+                    priority,
+                    status,
+                    created_by,
+                    created_at,
+                    updated_at
+                FROM cases_mgmt
+                WHERE case_id::text = :case_id
+            """), {"case_id": case_id}).mappings().first()
+
+            if not row:
+                return {"error": "not_found"}
+
+            return dict(row)
+    except Exception as e:
+        return {"error": "db_error", "detail": str(e)}
+
+
+@app.post("/cases/{case_id}/action")
+def case_action(case_id: str, req: CaseActionRequest):
+    if not engine:
+        return {"ok": False, "error": "no_database", "engine_error": engine_error}
+
+    action = req.action.upper().strip()
+    mapping = {
+        "ACKNOWLEDGE": "ACKNOWLEDGED",
+        "ESCALATE": "ESCALATED",
+        "CLOSE": "CLOSED",
+    }
+
+    if action not in mapping:
+        return {"ok": False, "error": "invalid_action"}
+
+    try:
+        with engine.begin() as conn:
+            updated = conn.execute(text("""
+                UPDATE cases_mgmt
+                SET
+                    status = :status,
+                    updated_at = NOW()
+                WHERE case_id::text = :case_id
+                RETURNING
+                    case_id::text,
+                    title,
+                    priority,
+                    status,
+                    created_by,
+                    created_at,
+                    updated_at
+            """), {
+                "case_id": case_id,
+                "status": mapping[action],
+            }).mappings().first()
+
+            if not updated:
+                return {"ok": False, "error": "not_found"}
+
+            
+            insert_event(conn, case_id, "ACTION", f"Case action executed: {action}", req.actor)
+            return {"ok": True, "case": dict(updated)}
+    
+    except Exception as e:
+        return {"ok": False, "error": "db_error", "detail": str(e)}
+
+
+import json
+from typing import Any, Dict, List, Optional
+from pydantic import Field
+
+class NoteCreate(BaseModel):
+    author: str = Field(..., min_length=1)
+    content: str = Field(..., min_length=1)
+    tags: Optional[List[str]] = []
+
+class TimelineCreate(BaseModel):
+    event_type: str
+    description: str
+    source: str = "system"
+    metadata: Optional[Dict[str, Any]] = {}
+
+def insert_note(conn, case_id, author, content, tags=None):
+    tags = tags or []
+    row = conn.execute(text("""
+        INSERT INTO analyst_notes (case_id, author, content, tags)
+        VALUES (:case_id, :author, :content, :tags)
+        RETURNING *
+    """), {
+        "case_id": case_id,
+        "author": author,
+        "content": content,
+        "tags": tags
+    }).mappings().first()
+    return dict(row)
+
+def get_notes(conn, case_id):
+    rows = conn.execute(text("""
+        SELECT * FROM analyst_notes
+        WHERE case_id = :case_id
+        ORDER BY created_at ASC
+    """), {"case_id": case_id}).mappings().all()
+    return list(rows)
+
+def insert_event(conn, case_id, etype, desc, source="system", meta=None):
+    row = conn.execute(text("""
+        INSERT INTO case_timeline (case_id, event_type, description, source, metadata)
+        VALUES (:c, :t, :d, :s, CAST(:m AS JSONB))
+        RETURNING *
+    """), {
+        "c": case_id,
+        "t": etype,
+        "d": desc,
+        "s": source,
+        "m": json.dumps(meta or {})
+    }).mappings().first()
+    return dict(row)
+
+def get_timeline(conn, case_id):
+    rows = conn.execute(text("""
+        SELECT * FROM case_timeline
+        WHERE case_id = :case_id
+        ORDER BY created_at ASC
+    """), {"case_id": case_id}).mappings().all()
+    return list(rows)
+
+@app.post("/cases/{case_id}/notes")
+def create_note(case_id: str, payload: NoteCreate):
+    with engine.begin() as conn:
+        note = insert_note(conn, case_id, payload.author, payload.content, payload.tags)
+        insert_event(conn, case_id, "NOTE", f"Note added by {payload.author}", payload.author)
+        return {"ok": True, "note": note}
+
+@app.get("/cases/{case_id}/notes")
+def list_notes(case_id: str):
+    with engine.begin() as conn:
+        return {"notes": get_notes(conn, case_id)}
+
+@app.get("/cases/{case_id}/timeline")
+def timeline(case_id: str):
+    with engine.begin() as conn:
+        return {"timeline": get_timeline(conn, case_id)}
+
+@app.post("/cases/{case_id}/timeline")
+def add_event(case_id: str, payload: TimelineCreate):
+    with engine.begin() as conn:
+        ev = insert_event(conn, case_id, payload.event_type, payload.description, payload.source, payload.metadata)
+        return {"ok": True, "event": ev}
