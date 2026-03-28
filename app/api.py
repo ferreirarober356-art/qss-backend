@@ -514,3 +514,198 @@ def auto_response_engine(conn, case_id, case_row, summary):
 
     except Exception:
         pass
+
+
+class HuntRequest(BaseModel):
+    objective: str = "Autonomous threat hunt"
+    actor: str = "ai-hunter"
+
+def generate_hunt_plan(case_row, notes, timeline):
+    title = case_row.get("title", "Unknown Case")
+    priority = case_row.get("priority", "UNKNOWN")
+    status = case_row.get("status", "UNKNOWN")
+
+    combined_text = " ".join(
+        [title, priority, status]
+        + [str(n.get("content", "")) for n in (notes or [])]
+        + [str(t.get("description", "")) for t in (timeline or [])]
+    ).lower()
+
+    hypotheses = []
+    pivots = []
+    queries = []
+    confidence = "medium"
+
+    if "credential" in combined_text or "password" in combined_text or "auth" in combined_text:
+        hypotheses.append("Possible credential abuse or password spray activity")
+        pivots.extend(["identity provider logs", "failed vs successful auth spikes", "privileged account review"])
+        queries.extend([
+            "failed logins by source IP over time",
+            "successful logins following multiple failures",
+            "new admin role assignments"
+        ])
+
+    if "lateral" in combined_text or "movement" in combined_text:
+        hypotheses.append("Possible lateral movement between hosts")
+        pivots.extend(["east-west traffic", "remote execution telemetry", "new service creation"])
+        queries.extend([
+            "RDP/SMB/WMI activity between internal assets",
+            "process creation linked to remote admin tools",
+            "new scheduled tasks or services"
+        ])
+        confidence = "high"
+
+    if "phish" in combined_text or "email" in combined_text:
+        hypotheses.append("Potential phishing-driven initial access")
+        pivots.extend(["mail gateway logs", "user click telemetry", "new inbox rule events"])
+        queries.extend([
+            "emails with suspicious sender domains",
+            "mailbox rule creation after suspect message delivery",
+            "login events after mail interaction"
+        ])
+
+    if not hypotheses:
+        hypotheses.append("General suspicious activity requiring enrichment and scoping")
+        pivots.extend(["endpoint alerts", "network connections", "recent auth anomalies"])
+        queries.extend([
+            "recent high-severity alerts for affected assets",
+            "unusual outbound connections",
+            "recent user/account changes"
+        ])
+
+    return {
+        "case_id": str(case_row.get("case_id")),
+        "objective": "Autonomous threat hunt",
+        "hypotheses": hypotheses,
+        "pivots": pivots,
+        "queries": queries,
+        "confidence": confidence,
+    }
+
+def generate_hunt_plan_ai(case_row, notes, timeline, objective="Autonomous threat hunt"):
+    if not client:
+        return None
+
+    payload = {
+        "case": case_row,
+        "notes": notes,
+        "timeline": timeline,
+        "objective": objective,
+        "task": (
+            "Return strict JSON with keys: case_id, objective, hypotheses, pivots, queries, confidence. "
+            "Focus on SOC hunting actions and concise operational pivots."
+        ),
+    }
+
+    response = client.chat.completions.create(
+        model="gpt-4.1-mini",
+        response_format={"type": "json_object"},
+        messages=[
+            {"role": "system", "content": "You are an autonomous SOC threat hunter. Output strict JSON only."},
+            {"role": "user", "content": json.dumps(payload)},
+        ],
+    )
+
+    data = json.loads(response.choices[0].message.content)
+    return {
+        "case_id": str(case_row.get("case_id")),
+        "objective": data.get("objective", objective),
+        "hypotheses": data.get("hypotheses", []),
+        "pivots": data.get("pivots", []),
+        "queries": data.get("queries", []),
+        "confidence": data.get("confidence", "medium"),
+    }
+
+@app.get("/cases/{case_id}/hunt")
+def get_hunt_plan(case_id: str):
+    if not engine:
+        return {"ok": False, "error": "no_database", "engine_error": engine_error}
+
+    try:
+        with engine.begin() as conn:
+            case_row = conn.execute(text("""
+                SELECT
+                    case_id::text,
+                    title,
+                    priority,
+                    status,
+                    created_by,
+                    created_at,
+                    updated_at
+                FROM cases_mgmt
+                WHERE case_id::text = :case_id
+            """), {"case_id": case_id}).mappings().first()
+
+            if not case_row:
+                return {"ok": False, "error": "not_found"}
+
+            notes = conn.execute(text("""
+                SELECT note_id, case_id, author, content, tags, created_at
+                FROM analyst_notes
+                WHERE case_id = :case_id
+                ORDER BY created_at ASC
+            """), {"case_id": case_id}).mappings().all()
+
+            timeline = conn.execute(text("""
+                SELECT event_id, case_id, event_type, description, source, metadata, created_at
+                FROM case_timeline
+                WHERE case_id = :case_id
+                ORDER BY created_at ASC
+            """), {"case_id": case_id}).mappings().all()
+
+            plan = generate_hunt_plan_ai(dict(case_row), list(notes), list(timeline)) or generate_hunt_plan(dict(case_row), list(notes), list(timeline))
+            return {"ok": True, "hunt": plan}
+    except Exception as e:
+        return {"ok": False, "error": "db_error", "detail": str(e)}
+
+@app.post("/cases/{case_id}/hunt")
+def run_hunt(case_id: str, req: HuntRequest):
+    if not engine:
+        return {"ok": False, "error": "no_database", "engine_error": engine_error}
+
+    try:
+        with engine.begin() as conn:
+            case_row = conn.execute(text("""
+                SELECT
+                    case_id::text,
+                    title,
+                    priority,
+                    status,
+                    created_by,
+                    created_at,
+                    updated_at
+                FROM cases_mgmt
+                WHERE case_id::text = :case_id
+            """), {"case_id": case_id}).mappings().first()
+
+            if not case_row:
+                return {"ok": False, "error": "not_found"}
+
+            notes = conn.execute(text("""
+                SELECT note_id, case_id, author, content, tags, created_at
+                FROM analyst_notes
+                WHERE case_id = :case_id
+                ORDER BY created_at ASC
+            """), {"case_id": case_id}).mappings().all()
+
+            timeline = conn.execute(text("""
+                SELECT event_id, case_id, event_type, description, source, metadata, created_at
+                FROM case_timeline
+                WHERE case_id = :case_id
+                ORDER BY created_at ASC
+            """), {"case_id": case_id}).mappings().all()
+
+            plan = generate_hunt_plan_ai(dict(case_row), list(notes), list(timeline), req.objective) or generate_hunt_plan(dict(case_row), list(notes), list(timeline))
+
+            insert_event(
+                conn,
+                case_id,
+                "HUNT",
+                f"Autonomous hunt generated: {req.objective}",
+                req.actor,
+                plan
+            )
+
+            return {"ok": True, "hunt": plan, "status": "generated"}
+    except Exception as e:
+        return {"ok": False, "error": "db_error", "detail": str(e)}
