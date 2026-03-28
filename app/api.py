@@ -736,9 +736,47 @@ def auto_hunt_and_response(conn, case_id, case_row, summary):
             hunt_objective = "Investigate high-priority case for scope, impact, and follow-on attacker activity"
 
         deduped = []
+        
+
+        existing = conn.execute(text("""
+            SELECT description
+            FROM case_timeline
+            WHERE case_id = :case_id
+              AND event_type = 'AUTO_MISSION'
+        """), {"case_id": case_id}).mappings().all()
+
+        existing_descriptions = {row["description"] for row in existing}
+
+        deduped = []
+        for mission in triggered_missions:
+            desc = f"Auto-triggered mission: {mission}"
+            if desc not in existing_descriptions:
+                deduped.append(mission)
+
+        triggered_missions = deduped
+
         for mission in triggered_missions:
             if mission not in deduped:
                 deduped.append(mission)
+        triggered_missions = deduped
+
+        
+
+        existing = conn.execute(text("""
+            SELECT description
+            FROM case_timeline
+            WHERE case_id = :case_id
+              AND event_type = 'AUTO_MISSION'
+        """), {"case_id": case_id}).mappings().all()
+
+        existing_descriptions = {row["description"] for row in existing}
+
+        deduped = []
+        for mission in triggered_missions:
+            desc = f"Auto-triggered mission: {mission}"
+            if desc not in existing_descriptions:
+                deduped.append(mission)
+
         triggered_missions = deduped
 
         for mission in triggered_missions:
