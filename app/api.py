@@ -405,7 +405,10 @@ def case_summary(case_id: str):
             """), {"case_id": case_id}).mappings().all()
 
             summary = generate_case_summary_ai(dict(case_row), list(notes), list(timeline)) or generate_case_summary(dict(case_row), list(notes), list(timeline))
+            
+            auto_response_engine(conn, case_id, dict(case_row), summary)
             return {"ok": True, "summary": summary}
+    
     except Exception as e:
         return {"ok": False, "error": "db_error", "detail": str(e)}
 
@@ -470,3 +473,44 @@ def generate_case_summary_ai(case_row, notes, timeline):
     )
 
     return json.loads(response.choices[0].message.content)
+
+
+def auto_response_engine(conn, case_id, case_row, summary):
+    try:
+        priority = case_row.get("priority", "MEDIUM")
+        tactics = summary.get("likely_tactics", [])
+
+        triggered = []
+
+        if priority in ("HIGH", "CRITICAL"):
+            triggered.append("Containment Workflow")
+            triggered.append("Executive Reporting Workflow")
+
+        if "TA0008" in tactics:
+            triggered.append("Lateral Movement Hunt")
+
+        if "TA0006" in tactics:
+            triggered.append("Credential Review Sweep")
+
+        for mission in triggered:
+            insert_event(
+                conn,
+                case_id,
+                "AUTO_MISSION",
+                f"Auto-triggered mission: {mission}",
+                "ai-engine",
+                {"reason": "auto_response"}
+            )
+
+        if triggered:
+            insert_event(
+                conn,
+                case_id,
+                "AI",
+                f"Auto-response triggered {len(triggered)} missions",
+                "ai-engine",
+                {"missions": triggered}
+            )
+
+    except Exception:
+        pass
