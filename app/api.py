@@ -858,3 +858,163 @@ def plan_response(case_id: str, payload: dict):
         )
 
         return {"ok": True, "planned": payload}
+
+
+class ResponseApproveRequest(BaseModel):
+    approver: str = "analyst"
+
+def ensure_response_table(conn):
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS response_actions (
+            response_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            case_id TEXT NOT NULL,
+            action_type TEXT NOT NULL,
+            target TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'PENDING_APPROVAL',
+            requested_by TEXT NOT NULL DEFAULT 'ai-engine',
+            approved_by TEXT,
+            execution_result JSONB NOT NULL DEFAULT '{}'::jsonb,
+            created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+        )
+    """))
+
+def insert_response_action(conn, case_id, action_type, target, requested_by="ai-engine"):
+    ensure_response_table(conn)
+    row = conn.execute(text("""
+        INSERT INTO response_actions (case_id, action_type, target, requested_by)
+        VALUES (:case_id, :action_type, :target, :requested_by)
+        RETURNING *
+    """), {
+        "case_id": case_id,
+        "action_type": action_type,
+        "target": target,
+        "requested_by": requested_by
+    }).mappings().first()
+    return dict(row)
+
+def list_response_actions(conn, case_id):
+    ensure_response_table(conn)
+    rows = conn.execute(text("""
+        SELECT *
+        FROM response_actions
+        WHERE case_id = :case_id
+        ORDER BY created_at ASC
+    """), {"case_id": case_id}).mappings().all()
+    return list(rows)
+
+def execute_response_adapter(action_type, target):
+    if action_type == "block_ip":
+        return {"ok": True, "mode": "simulated", "message": f"Simulated firewall block for {target}"}
+    if action_type == "disable_user":
+        return {"ok": True, "mode": "simulated", "message": f"Simulated user disable for {target}"}
+    if action_type == "isolate_host":
+        return {"ok": True, "mode": "simulated", "message": f"Simulated host isolation for {target}"}
+    if action_type == "contain_case":
+        return {"ok": True, "mode": "simulated", "message": f"Simulated case containment for {target}"}
+    return {"ok": False, "mode": "simulated", "message": f"Unknown action type: {action_type}"}
+
+@app.get("/cases/{case_id}/response")
+def get_response_actions(case_id: str):
+    if not engine:
+        return {"ok": False, "error": "no_database", "engine_error": engine_error}
+    try:
+        with engine.begin() as conn:
+            return {"ok": True, "responses": list_response_actions(conn, case_id)}
+    except Exception as e:
+        return {"ok": False, "error": "db_error", "detail": str(e)}
+
+@app.post("/cases/{case_id}/response/{response_id}/approve")
+def approve_response(case_id: str, response_id: str, req: ResponseApproveRequest):
+    if not engine:
+        return {"ok": False, "error": "no_database", "engine_error": engine_error}
+    try:
+        with engine.begin() as conn:
+            ensure_response_table(conn)
+            row = conn.execute(text("""
+                UPDATE response_actions
+                SET
+                    status = 'APPROVED',
+                    approved_by = :approved_by,
+                    updated_at = NOW()
+                WHERE case_id = :case_id
+                  AND response_id::text = :response_id
+                RETURNING *
+            """), {
+                "case_id": case_id,
+                "response_id": response_id,
+                "approved_by": req.approver
+            }).mappings().first()
+
+            if not row:
+                return {"ok": False, "error": "not_found"}
+
+            insert_event(
+                conn,
+                case_id,
+                "RESPONSE_APPROVED",
+                f"Approved response: {row['action_type']} -> {row['target']}",
+                req.approver,
+                {"response_id": str(row["response_id"])}
+            )
+
+            return {"ok": True, "response": dict(row)}
+    except Exception as e:
+        return {"ok": False, "error": "db_error", "detail": str(e)}
+
+@app.post("/cases/{case_id}/response/{response_id}/execute")
+def execute_response(case_id: str, response_id: str):
+    if not engine:
+        return {"ok": False, "error": "no_database", "engine_error": engine_error}
+    try:
+        with engine.begin() as conn:
+            ensure_response_table(conn)
+            row = conn.execute(text("""
+                SELECT *
+                FROM response_actions
+                WHERE case_id = :case_id
+                  AND response_id::text = :response_id
+            """), {
+                "case_id": case_id,
+                "response_id": response_id
+            }).mappings().first()
+
+            if not row:
+                return {"ok": False, "error": "not_found"}
+
+            if row["status"] != "APPROVED":
+                return {"ok": False, "error": "not_approved"}
+
+            result = execute_response_adapter(row["action_type"], row["target"])
+            new_status = "EXECUTED" if result.get("ok") else "FAILED"
+
+            updated = conn.execute(text("""
+                UPDATE response_actions
+                SET
+                    status = :status,
+                    execution_result = CAST(:execution_result AS JSONB),
+                    updated_at = NOW()
+                WHERE response_id::text = :response_id
+                RETURNING *
+            """), {
+                "response_id": response_id,
+                "status": new_status,
+                "execution_result": json.dumps(result)
+            }).mappings().first()
+
+            insert_event(
+                conn,
+                case_id,
+                "RESPONSE_EXECUTED",
+                f"Executed response: {row['action_type']} -> {row['target']}",
+                "response-engine",
+                {
+                    "response_id": response_id,
+                    "result": result,
+                    "status": new_status
+                }
+            )
+
+            return {"ok": True, "response": dict(updated), "execution": result}
+    except Exception as e:
+        return {"ok": False, "error": "db_error", "detail": str(e)}
