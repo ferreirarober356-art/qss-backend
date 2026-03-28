@@ -1028,6 +1028,8 @@ def execute_response(case_id: str, response_id: str):
 
 def auto_plan_containment_actions(conn, case_id, case_row, summary):
     try:
+        ensure_response_table(conn)
+
         priority = str(case_row.get("priority", "MEDIUM")).upper()
         tactics = summary.get("likely_tactics", []) or []
         plans = []
@@ -1088,6 +1090,16 @@ def auto_plan_containment_actions(conn, case_id, case_row, summary):
                 {"planned_actions": created}
             )
 
-        return {"planned_actions": created}
-    except Exception:
-        return {"planned_actions": []}
+        return {
+            "planned_actions": created,
+            "priority": priority,
+            "tactics": tactics,
+            "candidate_plans": plans
+        }
+    except Exception as e:
+        return {
+            "planned_actions": [],
+            "error": str(e),
+            "priority": str(case_row.get("priority", "MEDIUM")).upper(),
+            "tactics": summary.get("likely_tactics", []) or []
+        }
