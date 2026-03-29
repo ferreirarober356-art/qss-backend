@@ -409,11 +409,13 @@ def case_summary(case_id: str):
             auto_response_engine(conn, case_id, dict(case_row), summary)
             auto_result = auto_hunt_and_response(conn, case_id, dict(case_row), summary)
             containment_result = auto_plan_containment_actions(conn, case_id, dict(case_row), summary)
+            policy_result = auto_apply_response_policy(conn, case_id, dict(case_row))
             return {
                 "ok": True,
                 "summary": summary,
                 "autonomous_actions": auto_result,
-                "auto_planned_responses": containment_result
+                "auto_planned_responses": containment_result,
+                "policy_result": policy_result
             }
     
     except Exception as e:
@@ -1107,3 +1109,101 @@ def auto_plan_containment_actions(conn, case_id, case_row, summary):
             "tactics": summary.get("likely_tactics", []) or [],
             "helper_version": "debug_v2"
         }
+
+
+def auto_apply_response_policy(conn, case_id, case_row):
+    try:
+        priority = str(case_row.get("priority", "MEDIUM")).upper()
+
+        rows = conn.execute(text("""
+            SELECT *
+            FROM response_actions
+            WHERE case_id = :case_id
+              AND status = 'PENDING_APPROVAL'
+        """), {"case_id": case_id}).mappings().all()
+
+        auto_approved = []
+        auto_executed = []
+
+        for row in rows:
+            action_type = row["action_type"]
+            response_id = str(row["response_id"])
+            target = row["target"]
+
+            approve = False
+
+            if action_type == "block_ip":
+                approve = True
+
+            if action_type == "contain_case" and priority in ("HIGH", "CRITICAL"):
+                approve = True
+
+            if not approve:
+                continue
+
+            # approve
+            conn.execute(text("""
+                UPDATE response_actions
+                SET status='APPROVED', approved_by='ai-policy'
+                WHERE response_id::text = :response_id
+            """), {"response_id": response_id})
+
+            insert_event(
+                conn,
+                case_id,
+                "RESPONSE_APPROVED",
+                f"Auto-approved response: {action_type} -> {target}",
+                "ai-policy",
+                {"response_id": response_id}
+            )
+
+            auto_approved.append(response_id)
+
+            # execute
+            result = execute_response_adapter(action_type, target)
+
+            new_status = "EXECUTED" if result.get("ok") else "FAILED"
+
+            conn.execute(text("""
+                UPDATE response_actions
+                SET status=:status,
+                    execution_result=CAST(:res AS JSONB)
+                WHERE response_id::text = :response_id
+            """), {
+                "response_id": response_id,
+                "status": new_status,
+                "res": json.dumps(result)
+            })
+
+            insert_event(
+                conn,
+                case_id,
+                "RESPONSE_EXECUTED",
+                f"Auto-executed response: {action_type} -> {target}",
+                "ai-policy",
+                {
+                    "response_id": response_id,
+                    "result": result,
+                    "status": new_status
+                }
+            )
+
+            auto_executed.append(response_id)
+
+        if auto_executed:
+            insert_event(
+                conn,
+                case_id,
+                "AI",
+                f"Auto-executed {len(auto_executed)} response actions",
+                "ai-policy",
+                {"responses": auto_executed}
+            )
+
+        return {
+            "approved": auto_approved,
+            "executed": auto_executed
+        }
+
+    except Exception as e:
+        return {"error": str(e)}
