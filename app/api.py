@@ -1,4 +1,5 @@
 import os
+import subprocess
 import json
 from openai import OpenAI
 from fastapi import FastAPI
@@ -18,6 +19,7 @@ app.add_middleware(
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+RESPONSE_MODE = os.getenv("RESPONSE_MODE", "dry_run")
 engine = None
 engine_error = None
 client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
@@ -912,15 +914,51 @@ def list_response_actions(conn, case_id):
     return list(rows)
 
 def execute_response_adapter(action_type, target):
-    if action_type == "block_ip":
-        return {"ok": True, "mode": "simulated", "message": f"Simulated firewall block for {target}"}
-    if action_type == "disable_user":
-        return {"ok": True, "mode": "simulated", "message": f"Simulated user disable for {target}"}
-    if action_type == "isolate_host":
-        return {"ok": True, "mode": "simulated", "message": f"Simulated host isolation for {target}"}
+    if RESPONSE_MODE != "live":
+        if action_type == "block_ip":
+            return {"ok": True, "mode": "simulated", "message": f"Simulated firewall block for {target}"}
+        if action_type == "disable_user":
+            return {"ok": True, "mode": "simulated", "message": f"Simulated user disable for {target}"}
+        if action_type == "isolate_host":
+            return {"ok": True, "mode": "simulated", "message": f"Simulated host isolation for {target}"}
+        if action_type == "contain_case":
+            return {"ok": True, "mode": "simulated", "message": f"Simulated case containment for {target}"}
+        return {"ok": False, "mode": "simulated", "message": f"Unknown action type: {action_type}"}
+
+    script_map = {
+        "block_ip": ["bash", "adapters/firewall_block_ip.sh", target],
+        "disable_user": ["bash", "adapters/identity_disable_user.sh", target],
+        "isolate_host": ["bash", "adapters/edr_isolate_host.sh", target],
+        "contain_case": None,
+    }
+
     if action_type == "contain_case":
-        return {"ok": True, "mode": "simulated", "message": f"Simulated case containment for {target}"}
-    return {"ok": False, "mode": "simulated", "message": f"Unknown action type: {action_type}"}
+        return {"ok": True, "mode": "live", "message": f"Containment workflow marked live for {target}"}
+
+    cmd = script_map.get(action_type)
+    if not cmd:
+        return {"ok": False, "mode": "live", "message": f"Unknown action type: {action_type}"}
+
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30, check=False)
+        stdout = (proc.stdout or "").strip()
+        stderr = (proc.stderr or "").strip()
+
+        if not stdout:
+            return {"ok": False, "mode": "live", "message": f"No adapter output", "stderr": stderr}
+
+        try:
+            return json.loads(stdout)
+        except Exception:
+            return {
+                "ok": proc.returncode == 0,
+                "mode": "live",
+                "message": stdout,
+                "stderr": stderr,
+                "returncode": proc.returncode
+            }
+    except Exception as e:
+        return {"ok": False, "mode": "live", "message": str(e)}
 
 @app.get("/cases/{case_id}/response")
 def get_response_actions(case_id: str):
