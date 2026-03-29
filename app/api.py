@@ -1033,7 +1033,7 @@ def execute_response(case_id: str, response_id: str):
                 return {"ok": False, "error": "not_approved"}
 
             result = execute_response_adapter(row["action_type"], row["target"])
-            new_status = "EXECUTED" if result.get("ok") else "FAILED"
+            new_status = execution_status if result.get("ok") else "FAILED"
 
             updated = conn.execute(text("""
                 UPDATE response_actions
@@ -1201,7 +1201,7 @@ def auto_apply_response_policy(conn, case_id, case_row):
             # execute
             result = execute_response_adapter(action_type, target)
 
-            new_status = "EXECUTED" if result.get("ok") else "FAILED"
+            new_status = execution_status if result.get("ok") else "FAILED"
 
             conn.execute(text("""
                 UPDATE response_actions
